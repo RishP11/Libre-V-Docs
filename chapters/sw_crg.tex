@@ -1,0 +1,142 @@
+\chapter{Clock and Reset Generator (CRG)}\label{ch:sw-crg}
+
+\section{Overview}
+The Clock and Reset Generator (CRG) is the control block that produces the SoC's clocks and resets and
+holds the platform's low-level configuration. It is a subordinate on the Pico subsystem's AHB bus
+(\texttt{0x0008\_0000} in Libre-V) and is reachable only from the Pico core, which uses it to bring the
+rest of the SoC out of reset --- most importantly to release the Rocket core during boot
+(\autoref{ch:sw-rocket-sys}).
+
+The register block is \emph{generated} from
+\texttt{pico\_subsystem/crg/scripts/control\_registers.csv}. Each entry has an index; the byte offset of
+a register is $\texttt{index} \times 4$. The generator also emits a CMSIS-style C header
+(\texttt{CONTROL\_REGISTERS.h}), so firmware accesses fields by name through a struct rather than by raw
+offset:
+\begin{lstlisting}[language=C]
+#include "crg.h"
+CRG->DC_ROCKET_RSTN   = 1u;   // release the Rocket from reset
+uint32_t en = CRG->DC_UART1_CLK_EN;
+\end{lstlisting}
+
+\begin{docnote}
+The register map is generated. To add or change a control register, edit the CSV and re-run the CRG
+generator; never hand-edit the emitted header. Offsets quoted in this chapter follow the base
+configuration CSV.
+\end{docnote}
+
+\section{Per-Domain Clock and Reset Slices}
+Every clocked domain is controlled by an identical nine-register \emph{clock slice} followed by a reset
+register. The slice configures a per-domain digitally controlled oscillator (DCO) and its divider/chopper
+network:
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Field register} & \textbf{Width} & \textbf{Purpose} \\
+\midrule
+\texttt{*\_DCO\_EN}  & 1 & DCO enable. \\
+\texttt{*\_DCO\_SEL} & 6 & DCO coarse frequency select. \\
+\texttt{*\_DIV\_SEL} & 3 & Output clock divider select. \\
+\texttt{*\_CHP\_SEL} & 4 & Charge-pump select. \\
+\texttt{*\_CHP\_EN}  & 1 & Charge-pump enable. \\
+\texttt{*\_INV\_EN}  & 1 & Clock invert enable. \\
+\texttt{*\_SRC\_SEL} & 3 & Clock source select (DCO vs external). \\
+\texttt{*\_EN\_CAP}  & 7 & Load-capacitor enable/trim. \\
+\texttt{*\_CLK\_EN}  & 1 & Gated clock enable for the domain. \\
+\texttt{*\_RSTN}     & 1 & Active-low reset for the domain. \\
+\bottomrule
+\end{tabular}
+
+The domains that carry a full clock slice, and the two that are reset-only, are listed below with the
+offset of their \texttt{CLK\_EN}/\texttt{RSTN} registers.
+
+\begin{longtable}{@{}lllll@{}}
+\toprule
+\textbf{Domain} & \textbf{Slice} & \texttt{CLK\_EN} & \texttt{RSTN} & \textbf{Reset of \texttt{RSTN}} \\
+\midrule
+\endhead
+\texttt{axi\_noc}     & full & 0x048 & 0x04C & 1 (runs at power-on) \\
+\texttt{rocket}       & full & 0x070 & 0x074 & \textbf{0 (held in reset)} \\
+\texttt{accelerator}  & full & 0x160 & 0x164 & 0 \\
+\texttt{hyperram}     & full & 0x188 & 0x18C & 0 \\
+\texttt{uart1}        & full & 0x228 & 0x22C & 1 \\
+\texttt{timer1}       & full & 0x250 & 0x254 & 1 \\
+\texttt{dma}          & full & 0x278 & 0x27C & 0 \\
+\texttt{uart0}        & reset only & -- & 0x1B8 & 1 \\
+\texttt{timer0}       & reset only & -- & 0x1BC & 1 \\
+\bottomrule
+\end{longtable}
+
+\texttt{uart0} and \texttt{timer0} have no clock slice: the whole Pico subsystem is one start-up clock
+domain, so for those peripherals the CRG exposes only a software reset.
+
+\begin{docwarning}
+\texttt{DC\_ROCKET\_RSTN} resets to \texttt{0}: the Rocket is held in reset at power-on and the Pico must
+release it (write \texttt{1}) as the final boot step (\autoref{ch:sw-rocket-sys}). Conversely,
+\texttt{DC\_AXI\_NOC\_RSTN} resets to \texttt{1}: gating the NoC clock or asserting its reset would cut
+the NoC out from under any master using it, including the Pico's own path to the peripherals.
+\end{docwarning}
+
+\section{Interrupt Controller Gates}
+Two CRG registers gate the Pico interrupt controller (\autoref{ch:sw-pico-sys}) globally:
+
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Register} & \textbf{Offset} & \textbf{Reset} & \textbf{Purpose} \\
+\midrule
+\texttt{DC\_IRQ\_GLOBAL\_EN} & 0x1E0 & 1 & Global enable for interrupt delivery to the core. \\
+\texttt{DC\_IRQ\_STICKY\_EN} & 0x1E4 & 1 & Enable the controller's sticky edge-capture latch. \\
+\bottomrule
+\end{tabular}
+
+\begin{docnote}
+\texttt{DC\_IRQ\_STICKY\_EN} is load-bearing, not optional: some interrupt sources (e.g.\ UART
+receive-data-ready with FIFOs off) are one-cycle pulses that are only observable because the sticky
+latch holds them. See \autoref{ch:sw-pico-sys}.
+\end{docnote}
+
+\section{SRAM Margin and Pad Controls}
+The CRG carries the memory-margin CSRs for the on-chip SRAMs and the pad-drive controls. Each SRAM group
+exposes the same four fields --- \texttt{STOV}, \texttt{EMA} (3~bits), \texttt{EMAW} (2~bits), and
+\texttt{EMAS} --- which tune the macro's timing margins.
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Group} & \textbf{Registers} & \textbf{Covers} \\
+\midrule
+\texttt{DC\_IMEM\_*}  & 0x078--0x084 & Pico IMEM SRAM margins. \\
+\texttt{DC\_MDMEM\_*} & 0x0C8--0x0D4 & NoC-side Rocket data-memory SRAM margins. \\
+\texttt{DC\_MIMEM\_*} & 0x0D8--0x0E4 & NoC-side Rocket instruction-memory SRAM margins. \\
+\texttt{DC\_PAD\_*}   & 0x0A0--0x0A8 & Pad slew/strength (\texttt{ST}, \texttt{SL}, \texttt{DS}). \\
+\bottomrule
+\end{tabular}
+
+\section{HyperRAM Configuration}
+The HyperRAM controller is configured through CRG CSRs rather than through its AXI data window
+(\autoref{ch:hw-noc}): the Pico programs these before the data window at \texttt{0xA000\_0000} is used.
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Register} & \textbf{Offset} & \textbf{Purpose} \\
+\midrule
+\texttt{DC\_HYPERRAM\_REG\_VALID}            & 0x0F0 & Configuration write strobe. \\
+\texttt{DC\_HYPERRAM\_REG\_BITS}             & 0x0F4 & 16-bit configuration payload. \\
+\texttt{DC\_HYPERRAM\_CONFIG\_WRLATENCY0}    & 0x0F8 & Write latency 0. \\
+\texttt{DC\_HYPERRAM\_CONFIG\_WRLATENCY1}    & 0x0FC & Write latency 1. \\
+\texttt{DC\_HYPERRAM\_CONFIG\_RWRLATENCY}    & 0x100 & Read/write recovery latency. \\
+\texttt{DC\_HYPERRAM\_CONFIG\_WRITEQFULLWAIT}& 0x104 & Write-queue-full wait. \\
+\bottomrule
+\end{tabular}
+
+\section{Source Files}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{File} & \textbf{Role} \\
+\midrule
+\texttt{pico\_subsystem/crg/scripts/control\_registers.csv} & Register map source of truth \\
+\texttt{pico\_subsystem/crg/out/} & Generated CRG RTL and \texttt{CONTROL\_REGISTERS.h} \\
+\texttt{software/drivers/crg.h} & Firmware view (CMSIS-style struct accessors) \\
+\bottomrule
+\end{tabular}
+
+\newpage

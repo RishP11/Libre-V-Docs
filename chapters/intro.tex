@@ -1,0 +1,39 @@
+\chapter*{About this Document}
+\addcontentsline{toc}{chapter}{About this Document}
+
+This document serves as the reference manual for the Libre-V System-on-Chip (SoC). It describes the SoC's functional blocks, their configuration options, and their intended usage. The manual is intended for software developers and hardware designers working with Libre-V platform at any abstraction.
+
+\subsection*{Release information}
+\addcontentsline{toc}{section}{Release Information}
+\begin{tabularx}{\textwidth}{@{}l l X@{}}
+\toprule
+\textbf{Version} & \textbf{Date} & \textbf{Changes} \\
+\midrule
+1.0 & Aug 2026 & Initial release. \\
+\bottomrule
+\end{tabularx}
+
+\subsection*{Conventions used in this manual}
+\addcontentsline{toc}{section}{Conventions}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Monospace} text indicates register names, field names, signal names, or code.
+  \item \textit{Italic} text indicates a value that you must supply.
+  \item Bit ranges are written \texttt{[hi:lo]}, for example \texttt{[7:4]}.
+  \item \colorbox{docLightBlue}{\textcolor{docBlue}{\textbf{Blue}}} panels highlight notes; \colorbox{red!5}{\textcolor{docWarnRed}{\textbf{red}}} panels highlight warnings and cautions the user should be careful about.
+\end{itemize}
+
+\subsection*{Abbreviations}
+\addcontentsline{toc}{section}{Abbreviations}
+\begin{tabular}{c l}
+  RF & Register File \\
+  RO & Read-Only Access \\
+  RW & Read-Write Access \\
+  WO & Write-Only Access (Reads are undefined/ have no meaning)\\
+\end{tabular}
+
+\subsection*{Notes}
+\addcontentsline{toc}{section}{Notes}
+\begin{itemize}
+  \item The official ARM/AMBA specifications have replaced the master--slave terminology with manager--subordinate. However, some parts of the Libre-V were developed before this terminology change and the legacy master--slave nomenclature may appear in corresponding source code.
+  \item The base implementation/specification refers to the SoC configuration that you get on cloning the repository. It is possible to configure the SoC to your needs using a Terminal User Interface. Note that this feature is still in beta testing stage and is not recommended for use without caution. 
+\end{itemize}

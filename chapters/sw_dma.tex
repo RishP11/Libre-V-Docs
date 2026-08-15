@@ -1,0 +1,191 @@
+\chapter{Direct Memory Access (DMA)}\label{ch:sw-dma}
+
+\section{Overview}
+Libre-V includes a single-channel DMA engine built from the PULP platform's \texttt{iDMA}. It is a NoC
+manager \emph{and} a NoC subordinate: the register frontend is a subordinate endpoint that software
+programs (\texttt{0x2020\_0000} in Libre-V), while the datapath is a separate manager endpoint
+(\texttt{dma\_mngr}) that issues the AXI4 read/write bursts moving the data. Both cores can program it
+over the NoC.
+
+The engine is assembled from three iDMA layers:
+\begin{enumerate}[nosep]
+  \item \textbf{Frontend} --- \texttt{idma\_reg32\_3d}: the 32-bit register file described here. One
+        register set (one stream) is instantiated, so only stream~0 of the \texttt{STATUS} /
+        \texttt{NEXT\_ID} / \texttt{DONE\_ID} groups is wired; the others read as zero.
+  \item \textbf{Midend} --- \texttt{idma\_nd\_midend}: expands a multi-dimensional (1-D/2-D/3-D)
+        descriptor into a stream of contiguous transfers.
+  \item \textbf{Backend} --- the \texttt{rw\_axi} backend: performs the actual AXI4 bursts. This build
+        generates the AXI backend only, so both source and destination protocols must stay AXI.
+\end{enumerate}
+
+\subsection{Programming Model}
+A transfer is described by writing the address, length, and (for 2-D/3-D) stride/repeat registers, then
+\textbf{reading} the \texttt{NEXT\_ID} register. The read is what launches the transfer; it returns the
+newly allocated transfer id. Completion is observed by polling \texttt{DONE\_ID} (the last completed id)
+or the \texttt{STATUS} busy bits. The typical sequence is:
+\begin{enumerate}[nosep]
+  \item Program \texttt{CONF} for the number of dimensions and burst options.
+  \item Write \texttt{SRC\_ADDR}, \texttt{DST\_ADDR}, \texttt{LENGTH} (and the dimension-2/3 stride and
+        repeat registers if applicable).
+  \item Read \texttt{NEXT\_ID} to launch; keep the returned id.
+  \item Wait until \texttt{DONE\_ID} $\ge$ that id, or until \texttt{STATUS} clears.
+\end{enumerate}
+
+\begin{docnote}
+Reading \texttt{NEXT\_ID} has a side effect: it \emph{launches} the transfer and increments the id. Do
+not read it to ``peek'' at the next id. A returned id of \texttt{0} means the descriptor was not
+accepted.
+\end{docnote}
+
+\section{Register Descriptions}
+Offsets are relative to the DMA frontend base. Only the registers used by the single instantiated
+stream are listed; the frontend reserves further offsets for additional streams that are not wired in
+this build.
+
+\regtitle{--}{Configuration Register (CONF)}
+
+\regmeta{0x2020\_0000}{0x000}{0x00000000}{RW}{Per-transfer options; program before launching.}
+
+\begin{register}{H}{Configuration Register (CONF)}{}
+
+  \regfield[gray!20]{Reserved}{14}{18}{{0}}
+  \regfield{DST\_PROT}{3}{15}{{000}}
+  \regfield{SRC\_PROT}{3}{12}{{000}}
+  \regfield{ENABLE\_ND}{2}{10}{{00}}
+  \regfield{DST\_MLEN}{3}{7}{{000}}
+  \regfield{SRC\_MLEN}{3}{4}{{000}}
+  \regfield{DRL}{1}{3}{0}
+  \regfield{SRL}{1}{2}{0}
+  \regfield{DEC\_RW}{1}{1}{0}
+  \regfield{DEC\_AW}{1}{0}{0}
+  \reglabel{Reset}
+
+\end{register}
+
+\textbf{Functional Description.}
+
+\texttt{CONF} selects the number of active dimensions and tunes burst behaviour. In the base
+configuration both protocol fields must remain \texttt{0} (AXI), since only the \texttt{rw\_axi} backend
+is generated.
+
+\begin{regmap}
+31:18 & reserved   & RW & 0 & Reserved. \\
+17:15 & DST\_PROT  & RW & 0 & Destination protocol (\texttt{idma\_pkg::protocol\_e}). Must be 0 (AXI). \\
+14:12 & SRC\_PROT  & RW & 0 & Source protocol. Must be 0 (AXI). \\
+11:10 & ENABLE\_ND & RW & 0 & Active dimensions: 0 = 1-D, 1 = 2-D, 2 = 3-D. \\
+9:7   & DST\_MLEN  & RW & 0 & $\log_2$ of the maximum destination burst length (with \textbf{DRL}). \\
+6:4   & SRC\_MLEN  & RW & 0 & $\log_2$ of the maximum source burst length (with \textbf{SRL}). \\
+3     & DRL        & RW & 0 & Destination reduce-length: cap destination bursts to \textbf{DST\_MLEN}. \\
+2     & SRL        & RW & 0 & Source reduce-length: cap source bursts to \textbf{SRC\_MLEN}. \\
+1     & DEC\_RW    & RW & 0 & Fully decouple reads and writes (deadlock risk; use with care). \\
+0     & DEC\_AW    & RW & 0 & Issue write addresses only after the first read returns. \\
+\end{regmap}
+
+\regtitle{--}{Status Register (STATUS)}
+
+\regmeta{0x2020\_0000}{0x004}{0x00000000}{RO}{Busy bits for the backend sub-units and the midend.}
+
+\textbf{Functional Description.}
+
+\texttt{STATUS} is the packed busy vector \{\,\texttt{midend\_busy}, \texttt{idma\_busy}\,\}: bits
+\texttt{[7:0]} are the backend sub-unit busy flags and bit~8 is the ND midend. The engine is idle when
+the whole field reads \texttt{0}.
+
+\begin{regmap}
+8   & MIDEND\_BUSY & RO & 0 & ND midend is expanding a descriptor. \\
+7:0 & IDMA\_BUSY   & RO & 0 & Backend busy flags: buffer, R/W datapath, R/W legalizer, error handler, RAW coupler. \\
+\end{regmap}
+
+\regtitle{--}{Next-ID Register (NEXT\_ID)}
+
+\regmeta{0x2020\_0000}{0x044}{0x00000000}{RO}{Reading launches the transfer and returns the new id.}
+
+\textbf{Functional Description.}
+
+Reading \texttt{NEXT\_ID} commits the currently programmed descriptor and returns its transfer id.
+A return value of \texttt{0} indicates the descriptor was rejected.
+
+\begin{regmap}
+31:0 & NEXT\_ID & RO & 0 & Read to launch; returns the allocated id (0 = rejected). \\
+\end{regmap}
+
+\regtitle{--}{Done-ID Register (DONE\_ID)}
+
+\regmeta{0x2020\_0000}{0x084}{0x00000000}{RO}{Id of the most recently completed transfer.}
+
+\textbf{Functional Description.}
+
+\texttt{DONE\_ID} holds the id of the last completed transfer. A transfer with id $n$ has finished once
+\texttt{DONE\_ID} $\ge n$.
+
+\begin{regmap}
+31:0 & DONE\_ID & RO & 0 & Last completed transfer id. \\
+\end{regmap}
+
+\subsection{Descriptor Registers}
+The address, length, stride, and repeat registers describe the transfer geometry. Dimension~1 is the
+innermost (contiguous) run of \texttt{LENGTH} bytes; dimensions~2 and~3 repeat that run with the given
+byte strides.
+
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Offset} & \textbf{Register} & \textbf{Access} & \textbf{Meaning} \\
+\midrule
+0x0D0 & DST\_ADDR     & RW & Destination base address. \\
+0x0D8 & SRC\_ADDR     & RW & Source base address. \\
+0x0E0 & LENGTH        & RW & Innermost (dimension-1) length in bytes. \\
+0x0E8 & DST\_STRIDE\_2 & RW & Destination stride between dimension-2 repeats. \\
+0x0F0 & SRC\_STRIDE\_2 & RW & Source stride between dimension-2 repeats. \\
+0x0F8 & REPS\_2        & RW & Dimension-2 repeat count. \\
+0x100 & DST\_STRIDE\_3 & RW & Destination stride between dimension-3 repeats. \\
+0x108 & SRC\_STRIDE\_3 & RW & Source stride between dimension-3 repeats. \\
+0x110 & REPS\_3        & RW & Dimension-3 repeat count. \\
+\bottomrule
+\end{tabular}
+
+\begin{docwarning}
+Two behaviours of the ND midend surprise callers and are load-bearing for correct descriptors:
+\begin{itemize}[nosep]
+  \item At a dimension boundary the \emph{outer} stride is applied \textbf{in place of} the inner
+        stride (not in addition to it), relative to the last run's start. A contiguous 3-D copy
+        therefore needs \texttt{stride\_3 == LENGTH}, not \texttt{stride\_3 == reps $\times$ LENGTH}.
+  \item A zero-length descriptor is \textbf{not} rejected: the frontend allocates an id before the
+        backend inspects the descriptor, so it retires normally while moving no data. Software cannot
+        use ``id == 0'' to detect a zero-length transfer.
+\end{itemize}
+\end{docwarning}
+
+\section{Interrupt}
+The DMA raises a completion interrupt on transfer retirement. It is delivered to the Pico interrupt
+controller as source~7 (\texttt{IRQ\_SRC\_DMA}, \autoref{ch:sw-pico-sys}) and to the Rocket's PLIC as
+source~1 (\texttt{ROCKET\_PLIC\_SRC\_DMA}, \autoref{ch:sw-rocket-sys}). It is a level tied to the busy
+state, so software should confirm completion (\texttt{DONE\_ID} / \texttt{STATUS}) at the device.
+
+\section{Address Map Summary}
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Offset} & \textbf{Register} & \textbf{Access} \\
+\midrule
+0x000 & CONF     & RW \\
+0x004 & STATUS   & RO \\
+0x044 & NEXT\_ID & RO (read = launch) \\
+0x084 & DONE\_ID & RO \\
+0x0D0--0x110 & descriptor (addr/len/stride/reps) & RW \\
+\bottomrule
+\end{tabular}
+
+\section{Source Files}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{File} & \textbf{Role} \\
+\midrule
+\texttt{peripherals/dma/\ldots/idma\_reg32\_3d} & 32-bit register frontend \\
+\texttt{peripherals/dma/\ldots/idma\_nd\_midend} & N-dimensional descriptor expansion \\
+\texttt{peripherals/dma/\ldots\ rw\_axi backend} & AXI4 read/write datapath \\
+\texttt{top/noc\_dma.sv} & NoC-side wrapper (subordinate frontend + manager datapath) \\
+\bottomrule
+\end{tabular}
+
+\newpage

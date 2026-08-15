@@ -1,0 +1,59 @@
+\documentclass[9pt,a4paper]{report}
+
+\input{preamble}
+
+\begin{document}
+
+\renewcommand{\docShortTitle}{Technical Reference Manual}
+\renewcommand{\docCode}{Stanford University}
+\newcommand{\aytooc}{I\textsuperscript{2}C}
+
+\makeCoverPage
+  {Libre-V (v1.0)\\ {\LARGE An Open-Source RISC-V SoC.}}
+  {User Reference}
+  {Stanford University}
+  {1.0}
+  {\today}
+
+\pagenumbering{roman}
+\include{chapters/intro}
+
+\tableofcontents
+\listoffigures
+\listoftables
+
+\clearpage
+\pagenumbering{arabic}
+
+\part{Architecture and Software View}
+
+This part is intended for audience intending to understand the platform's architecture, configure, and adopt it in their own system. 
+
+\include{chapters/sw_architecture}
+\include{chapters/sw_picosys}
+% \include{chapters/sw_rocketsys}
+\include{chapters/sw_uart}
+\include{chapters/sw_timer}
+% \include{chapters/sw_dma}
+% \include{chapters/sw_crg}
+% \include{chapters/sw_accel}
+\include{chapters/sw_sdk}
+
+\part{SoC Integration} 
+This part is intended for audience intending to understand the platform's architecture and modify/develop their own version at an RTL level. Libre platform is composed of three subsystems:
+\begin{itemize}
+  \item \hyperref[ch:hw-pico-sys]{Pico Subsystem}
+  \item \hyperref[ch:hw-rocket-sys]{Rocket Subsystem}
+  \item \hyperref[ch:hw-noc-sys]{Network-on-Chip (NoC) Subsystem}
+\end{itemize} 
+
+\include{chapters/hw_picosys}
+
+
+% \include{chapters/hw_rocketsys}
+% \include{chapters/hw_noc}
+
+\include{chapters/sram_generator}
+
+
+\end{document}

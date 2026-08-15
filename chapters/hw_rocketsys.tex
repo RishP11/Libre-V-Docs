@@ -1,0 +1,63 @@
+\chapter{Rocket Subsystem}\label{ch:hw-rocket-sys}
+
+\section{Overview}
+This chapter describes how the Rocket core is integrated into Libre-V. The software view --- memory
+map, PLIC sources, and the boot handshake --- is in \autoref{ch:sw-rocket-sys}.
+
+The Rocket RTL is not hand-written: it is produced by the \texttt{rocket-chip} generator from a Libre-V
+configuration and then wrapped by a single hand-written module that adapts its flat ports to the NoC.
+
+\section{Wrapper}
+\texttt{rocket\_subsystem.sv} is the only Rocket RTL authored in this repository. It instantiates the
+generated \texttt{ExampleRocketSystem} and:
+\begin{itemize}[nosep]
+  \item packs the flat \texttt{mem\_axi4} (cacheable) and \texttt{mmio\_axi4} (uncacheable) master ports
+        onto the typed FlooNoC request/response structs, exposing them as NoC endpoints
+        (\texttt{rocket\_subsystem\_mem} and \texttt{rocket\_subsystem\_mmio}, \autoref{ch:hw-noc});
+  \item ties off the debug (DMI/JTAG) interface, which is unused in the base configuration;
+  \item takes its clock and active-low reset from the CRG's \texttt{rocket} domain.
+\end{itemize}
+The split into two master ports is what keeps device registers uncacheable: only \texttt{mem\_axi4}
+passes through the coherence hub, while \texttt{mmio\_axi4} bypasses it.
+
+\section{Coherence}
+Because this is a bare \texttt{rocket-chip} with no L2, the configuration inserts a \emph{broadcast
+coherence hub} (\texttt{TLBroadcast}) between the tile and the memory port
+(\texttt{WithCoherentBusTopology}). The hub is not a cache; it serialises and tracks in-flight coherence
+transactions so the L1 D-cache stays consistent with external memory. It affects only the cacheable
+\texttt{mem\_axi4} path.
+
+\section{Generation Flow}
+The committed RTL under \texttt{rocket\_generated/} is a staged copy of the generator's output.
+
+\begin{enumerate}[nosep]
+  \item \texttt{LibreRocketConfig.scala} defines the configuration: one big RV64GC core, no virtual
+        memory, the two custom AXI master ports, and the coherence topology.
+  \item A custom BootROM (\texttt{libre\_bootrom.S}) provides the reset vector, which jumps to DRAM
+        (\texttt{0x8000\_0000}) on reset release.
+  \item \texttt{generate.sh} builds the BootROM image, elaborates the configuration through mill and
+        firtool, and stages the resulting SystemVerilog into \texttt{rocket\_generated/}.
+\end{enumerate}
+
+\begin{docnote}
+Editing the Rocket therefore means editing \texttt{LibreRocketConfig.scala} (or the BootROM) and
+re-running \texttt{generate.sh}; everything downstream (the staged RTL, the wrapper, the SoC build)
+follows. The generator tree is used only to \emph{produce} the RTL and is not itself compiled into the
+SoC.
+\end{docnote}
+
+\section{Source Files}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{File} & \textbf{Role} \\
+\midrule
+\texttt{rocket\_subsystem/rocket\_subsystem.sv} & Hand-written wrapper (ports $\to$ NoC structs) \\
+\texttt{rocket\_subsystem/rocket\_generated/} & Committed generated RTL \\
+\texttt{rocket\_subsystem/generate.sh} & Generation script (BootROM $\to$ elaborate $\to$ stage) \\
+\texttt{\ldots/system/LibreRocketConfig.scala} & Rocket configuration \\
+\texttt{\ldots/bootrom/libre\_bootrom.S} & Custom reset code \\
+\bottomrule
+\end{tabular}
+
+\newpage

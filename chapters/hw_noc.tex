@@ -1,0 +1,98 @@
+\chapter{Network-on-Chip (NoC)}\label{ch:hw-noc}
+
+\section{Overview}
+The blocks of Libre-V are tied together by an AXI4 Network-on-Chip generated with
+\href{https://github.com/pulp-platform/FlooNoC}{FlooNoC}. Every off-subsystem transfer --- the Pico
+reaching a peripheral, the Rocket fetching from its SRAMs, the DMA moving data, an interrupt-driving
+device being programmed --- crosses the NoC. It is described declaratively in \texttt{noc\_desc.yml} and
+elaborated by \texttt{floogen}; the base configuration uses a single router.
+
+Endpoints are either \emph{managers} (they issue transactions) or \emph{subordinates} (they are
+addressed). Managers carry no address range; subordinates own a fixed window in the 32-bit space.
+
+\section{Manager Endpoints}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Endpoint} & \textbf{Master} \\
+\midrule
+\texttt{pico\_subsystem}        & Pico core / COMMCTRL, via the AHB-to-AXI bridge (\autoref{ch:hw-pico-sys}). \\
+\texttt{rocket\_subsystem\_mem} & Rocket cacheable port (\texttt{mem\_axi4}). \\
+\texttt{rocket\_subsystem\_mmio}& Rocket uncacheable port (\texttt{mmio\_axi4}). \\
+\texttt{dma\_mngr}              & DMA datapath (the read/write bursts). \\
+\bottomrule
+\end{tabular}
+
+\section{Subordinate Endpoints and Address Map}
+The subordinate windows below form the system address map for everything reached over the NoC. Local
+Pico subordinates (\autoref{ch:sw-pico-sys}) and the Rocket-private devices (\autoref{ch:sw-rocket-sys})
+do not appear here --- they never leave their subsystem.
+
+\begin{longtable}{@{}llll@{}}
+\toprule
+\textbf{Endpoint} & \textbf{Base} & \textbf{Size} & \textbf{Device} \\
+\midrule
+\endhead
+\texttt{uart1}            & \texttt{0x2000\_0000} & 64\,KB  & UART1 (\autoref{ch:sw-uart}) \\
+\texttt{timer1}           & \texttt{0x2010\_0000} & 64\,KB  & TIMER1 (\autoref{ch:sw-timer}) \\
+\texttt{dma\_sub}         & \texttt{0x2020\_0000} & 64\,KB  & DMA registers (\autoref{ch:sw-dma}) \\
+\texttt{accelerator}      & \texttt{0x3000\_0000} & 32\,MB  & Accelerator (\autoref{ch:sw-accel}) \\
+\texttt{sram\_imem\_rocket}& \texttt{0x8000\_0000} & 256\,KB & Rocket instruction SRAM \\
+\texttt{sram\_dmem\_rocket}& \texttt{0x8010\_0000} & 256\,KB & Rocket data SRAM \\
+\texttt{hyperram}         & \texttt{0xA000\_0000} & 256\,MB & External HyperRAM data window \\
+\bottomrule
+\end{longtable}
+
+\begin{docwarning}
+The peripheral band starts at \texttt{0x2000\_0000}, not \texttt{0x1000\_0000}: COMMCTRL intercepts
+\texttt{0x1000\_0000} (bus handover) and \texttt{0x1000\_0004} (host interrupt) in its own front-end
+before those addresses reach the bus (\autoref{ch:sw-pico-sys}), so \texttt{0x1000\_0000}--\texttt{0x1000\_0FFF}
+is reserved and must stay unmapped. Peripherals are spaced 1\,MB apart within the band.
+\end{docwarning}
+
+\section{Clock Domains}
+Each endpoint belongs to a clock domain, and the top level places an AXI clock-domain-crossing
+(\texttt{axi\_cdc}) on the NoC side of each so a block can run at its own frequency. The base
+configuration exposes five domains (Pico, Rocket, and one each broadly for the peripheral, HyperRAM, and
+accelerator groups), clocked and reset through the CRG (\autoref{ch:sw-crg}).
+
+\begin{docnote}
+In the current simulation/testbench setup every domain is driven by the same clock, so the crossings
+operate as same-clock passthroughs. The CRG's per-domain clock generation and true frequency ratios are
+not exercised in that mode.
+\end{docnote}
+
+\section{Top-Level Integration}
+\texttt{libre\_top} instantiates the NoC (\texttt{floo\_libre\_v\_noc}) together with every endpoint's
+NoC-side wrapper and the clock-domain crossings:
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Instance} & \textbf{Role} \\
+\midrule
+\texttt{pico\_subsystem}        & Control plane + Pico manager (\autoref{ch:hw-pico-sys}) \\
+\texttt{rocket\_subsystem}      & Rocket manager, cacheable + uncacheable ports (\autoref{ch:hw-rocket-sys}) \\
+\texttt{noc\_dma}               & DMA manager + register subordinate \\
+\texttt{axi\_mem\_16384x64} ($\times$2) & Rocket instruction/data SRAMs \\
+\texttt{noc\_accelerator}       & Accelerator subordinate \\
+\texttt{noc\_hyperram}          & HyperRAM controller + data window \\
+\texttt{noc\_axi\_uart}         & UART1 subordinate \\
+\texttt{noc\_axi\_timer}        & TIMER1 subordinate \\
+\texttt{floo\_libre\_v\_noc}    & The generated FlooNoC fabric (router + links) \\
+\texttt{axi\_cdc} ($\times$N)   & Per-endpoint clock-domain crossings \\
+\bottomrule
+\end{tabular}
+
+\section{Source Files}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{File} & \textbf{Role} \\
+\midrule
+\texttt{top/libre\_top.sv} & SoC top-level: NoC + all endpoints + clock-domain crossings \\
+\texttt{noc/noc\_desc.yml} & Declarative NoC description (endpoints, address map, router) \\
+\texttt{noc/hw/} & Generated FlooNoC RTL \\
+\bottomrule
+\end{tabular}
+
+\newpage

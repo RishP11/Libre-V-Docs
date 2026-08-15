@@ -1,0 +1,123 @@
+\chapter{Rocket Subsystem}\label{ch:sw-rocket-sys}
+
+\section{Overview}
+The main core of Libre-V is a 64-bit Rocket core, generated from the Chips Alliance
+\texttt{rocket-chip} generator. It is a single ``big'' in-order core implementing RV64GC, with private
+L1 instruction and data caches and a broadcast coherence hub (there is no L2). Virtual memory is
+disabled in the base configuration (\texttt{WithoutVM}); the core runs in bare physical addressing, and
+the I\$/D\$ TLBs perform only PMP/PMA permission and cacheability checks.
+
+\begin{docwarning}
+This document does not describe the Rocket microarchitecture or the RISC-V ISA. For those, consult the
+\href{https://github.com/chipsalliance/rocket-chip}{rocket-chip} documentation and the ratified RISC-V
+specifications.
+\end{docwarning}
+
+The Rocket connects to the rest of the SoC through \textbf{two} AXI4 master ports, split by
+cacheability, so the core never caches side-effecting device registers:
+\begin{itemize}[nosep]
+  \item \textbf{\texttt{mem\_axi4}} (cacheable) --- behind the coherence hub. Carries L1 refills and
+        writebacks to real memory. Covers \texttt{0x8000\_0000}--\texttt{0xFFFF\_FFFF}
+        (Rocket instruction/data SRAMs, HyperRAM).
+  \item \textbf{\texttt{mmio\_axi4}} (uncacheable) --- hangs directly off the system bus and bypasses
+        the coherence hub, so its region advertises no cacheable access and device reads/writes are
+        never cached. Covers \texttt{0x1000\_0000}--\texttt{0x7FFF\_FFFF} (UART1, TIMER1, DMA,
+        accelerator).
+\end{itemize}
+Both windows start at or above \texttt{0x1000\_0000}; the low 256\,MiB stays private to the Rocket
+(Debug, BootROM, CLINT, PLIC).
+
+\section{Rocket-Private Devices}
+These devices are internal to the tile and never leave it. Their addresses are the rocket-chip defaults.
+
+\begin{longtable}{@{}llll@{}}
+\toprule
+\textbf{Device} & \textbf{Base} & \textbf{Range} & \textbf{Notes} \\
+\midrule
+\endhead
+Debug Module & \texttt{0x0000\_0000} & 4\,KB & DMI/JTAG debug; tied off in Libre-V. \\
+Error device & \texttt{0x0000\_3000} & 4\,KB & Catches bad accesses. \\
+Boot ROM     & \texttt{0x0001\_0000} & 64\,KB & Reset vector (\texttt{\_hang}) at \texttt{0x0001\_0040}. \\
+CLINT        & \texttt{0x0200\_0000} & 64\,KB & \texttt{msip}@+0x0, \texttt{mtimecmp}@+0x4000, \texttt{mtime}@+0xBFF8. \\
+PLIC         & \texttt{0x0C00\_0000} & 64\,MB & priority@+0x0, pending@+0x1000, enables@+0x2000, threshold/claim@+0x20\_0000. \\
+\bottomrule
+\end{longtable}
+
+\section{Memory Map Seen by the Rocket}
+Beyond the private devices, everything the Rocket reaches leaves on one of the two master ports and is
+routed by the NoC. The instruction/data placement below is a software convention, not a hardware split:
+the Rocket has a unified physical map fed by the I\$ (fetch) and D\$ (load/store) through the cacheable
+port, and has no on-tile RAM.
+
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Use} & \textbf{Base} & \textbf{Port} & \textbf{NoC endpoint} \\
+\midrule
+Program image  & \texttt{0x8000\_0000} & \texttt{mem\_axi4}  & \texttt{sram\_imem\_rocket} (256\,KB) \\
+Data           & \texttt{0x8010\_0000} & \texttt{mem\_axi4}  & \texttt{sram\_dmem\_rocket} (256\,KB) \\
+HyperRAM       & \texttt{0xA000\_0000} & \texttt{mem\_axi4}  & \texttt{hyperram} \\
+UART1          & \texttt{0x2000\_0000} & \texttt{mmio\_axi4} & \texttt{uart1} \\
+TIMER1         & \texttt{0x2010\_0000} & \texttt{mmio\_axi4} & \texttt{timer1} \\
+DMA            & \texttt{0x2020\_0000} & \texttt{mmio\_axi4} & \texttt{dma\_sub} \\
+Accelerator    & \texttt{0x3000\_0000} & \texttt{mmio\_axi4} & \texttt{accelerator} \\
+\bottomrule
+\end{tabular}
+
+\section{Interrupts (PLIC)}
+The Rocket takes external interrupts through its PLIC. Libre-V wires five external lines, one
+independent source per device (nothing is OR'd together):
+
+\begin{tabular}{@{}cll@{}}
+\toprule
+\textbf{PLIC source} & \textbf{Symbol} & \textbf{Device} \\
+\midrule
+1 & \texttt{ROCKET\_PLIC\_SRC\_DMA}      & DMA completion \\
+2 & \texttt{ROCKET\_PLIC\_SRC\_ACCEL}    & Accelerator (\autoref{ch:sw-accel}) \\
+3 & \texttt{ROCKET\_PLIC\_SRC\_TIMER1\_A}& TIMER1 overflow \\
+4 & \texttt{ROCKET\_PLIC\_SRC\_TIMER1\_B}& TIMER1 compare match \\
+5 & \texttt{ROCKET\_PLIC\_SRC\_UART1}    & UART1 \\
+\bottomrule
+\end{tabular}
+
+Software uses the PLIC in the usual way: set a per-source priority, raise the enable bit, lower the
+context threshold, then claim/complete inside the trap handler. Machine timer and software interrupts
+come from the CLINT (\texttt{mtimecmp}/\texttt{msip}). The Pico core drives \emph{no} Rocket interrupt
+line; the two cores communicate through shared memory and the boot handshake below.
+
+\section{Boot Mechanism}\label{sec:rocket-boot}
+The Rocket has no DMI/JTAG boot path in the base configuration. It is started by the Pico over the CRG:
+
+\begin{enumerate}[nosep]
+  \item At power-on the Rocket is held in reset by the CRG gate \texttt{DC\_ROCKET\_RSTN}, which resets
+        to \texttt{0}. The Pico subsystem shares the start-up clock and wakes first.
+  \item The Pico (or the host through COMMCTRL, \autoref{ch:sw-pico-sys}) loads the Rocket program into
+        \texttt{sram\_imem\_rocket} at \texttt{0x8000\_0000} and its data, then writes a boot sentinel
+        (\texttt{0xB007C0DE}) to the last word of the instruction region (\texttt{0x8003\_FFFC}). Because
+        the load path is in-order, the sentinel's arrival proves every image write has landed.
+  \item The Pico polls that sentinel, then releases the Rocket by writing \texttt{DC\_ROCKET\_RSTN = 1}.
+  \item Reset release is the trigger: the hart runs the BootROM reset vector (\texttt{\_hang} at
+        \texttt{0x0001\_0040}), which clears the chicken bits and jumps to \texttt{DRAM\_BASE}
+        (\texttt{0x8000\_0000}). There is no PLIC setup or \texttt{wfi} wait in the reset path.
+\end{enumerate}
+
+\begin{docnote}
+Because the D\$ is write-back, data the Rocket produces (for example a result buffer another master will
+read) stays dirty in the cache until it is flushed. Flush the affected range before signalling
+completion to another master.
+\end{docnote}
+
+\section{Source Files}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{File} & \textbf{Role} \\
+\midrule
+\texttt{rocket\_subsystem/rocket\_subsystem.sv} & Hand-written wrapper: packs the flat AXI ports onto the NoC structs \\
+\texttt{rocket\_subsystem/rocket\_generated/} & Generated Rocket RTL (from \texttt{LibreRocketConfig}) \\
+\texttt{rocket\_subsystem/generator/\ldots/LibreRocketConfig.scala} & Configuration (ports, VM, coherence hub) \\
+\texttt{rocket\_subsystem/generator/bootrom/libre\_bootrom.S} & Custom BootROM (reset-release-and-go) \\
+\texttt{software/libre\_rocket.h} & Firmware view: addresses, PLIC sources, cache helpers \\
+\bottomrule
+\end{tabular}
+
+\newpage

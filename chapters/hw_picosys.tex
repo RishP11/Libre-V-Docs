@@ -1,0 +1,20 @@
+\chapter{Pico Subsystem}\label{ch:hw-pico-sys}
+
+The Pico subsystem (picosys) is a auxiliary subsystem organized around an AHB-Lite bus. It is used to control the rest of the SoC. The AHB-Lite bus is driven by two managers: COMMCTRL/UART Controller and PicoRV32 core package (picopkg). However, both these managers are time-multiplexed using an AHB MUX, meaning that at any time, there is only a single manager driving the bus. For additional control and interaction, the bus supports a configurable peripheral bus with options like UART, Timers, etc., on-chip SRAM memory, clock and reset generator (CRG), and a bridge to connect to the AXI port of the NoC. 
+
+Picosys uses the CRG to bring up and control the remainder of the SoC. In this chapter, we breakdown the construction and integration of the picosys in Libre-V platform:
+\begin{itemize}
+  \item \hyperref[sec:hw-picorv32-pkg]{PicoRV32 Core and Package} 
+  \item COMMCTRL 
+  \item AHB-Lite MUX and Bus
+  \item Clock and Reset Generator (CRG)
+  \item Peripheral Cluster
+  \item On-chip SRAM 
+  \item AHB2AXI adapter 
+\end{itemize}
+
+\section{PicoRV32 Core and Package}\label{sec:hw-picorv32-pkg}
+
+
+
+\newpage

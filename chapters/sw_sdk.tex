@@ -1,0 +1,33 @@
+\chapter{Libre Software and Control} 
+
+\section{PicoRV32 Interrupt Handler}
+
+The PicoRv32 core has a built-in controller capable of handling 32 sources. The sources should be wired into the \texttt{irq} input port of the core/package. The handler also controles the \texttt{eoi} (end of interrupt) signals, which go high for the handled interrupt when the specific interrupt handler is called. 
+
+IRQs 0-2 are reserved for internal sources. These include: \begin{enumerate}
+      \item IRQ 0 - Timer interrupt
+      \item IRQ 1 - EBREAK/ECALL or Illegal INstructions
+      \item IRQ 2 - Bus error due to unaligned memory access.  
+\end{enumerate}
+
+4 additionals 32-bit regsiters (\texttt{q0-3}) are provided for IRQ handling. WHen the IRQ handler is called, the register \texttt{q0} contains the return address and \texttt{q1} contains the bitmask of all IRQs to be handled. This means one call to the interrupt handler needs to service more than one IRQ when more than one bit is set in \texttt{q1}. When compressed instruction mode is enabled, then the LSB of \texttt{q0} is set when the interrupt instruction is a compressed instruction. This can be userd if the IRQ handler wants to decode the interrupted instruciton. The other additional reisters are uninitializaed and scratch registers. 
+
+Custom instructions defined for interrupt handling: \begin{enumerate}
+      \item \texttt{get rd, qs}
+      
+      Copy the contents from a q-register to a general-purpose register. 
+      \item \texttt{retirq}
+      
+      Return from interrrupt. As side effects, the contents of \texttt{q0} are copied to the program counter and interrupts are re-enabled.
+      \item \texttt{maskirq}: 
+      
+      There is an IRQ MAsk register  containing a birmask of masked interrupts. This instruction writes a new valie to the ieq mask register and reads the old value. 
+
+      \item \texttt{waitirq}
+      
+      Pause execution until an interrupt becomes pending. 
+
+      \item \texttt{timer}
+      
+      Reset the timer counter to a new value. The counter counts down clock cycles and triggers the timer interrupt when transitioning from 1 to 0. Setting the counter to zero disables the timer. The old value of the counter is written to rd.
+\end{enumerate}

@@ -1,0 +1,174 @@
+\chapter{Accelerator}\label{ch:sw-accel}
+
+\section{Overview}
+Libre-V is intended as a host platform for testing accelerators, so the base implementation ships a
+small \emph{mock accelerator} as a placeholder that a user replaces with their own design. It occupies a
+subordinate endpoint on the NoC and presents a bank of 16 general-purpose 32-bit registers plus a single
+interrupt line. The mock accelerator does no computation of its own; it exists to exercise, and to
+document by example, the register and interrupt path an accelerator uses to talk to the cores.
+
+The accelerator exposes a native AXI4 subordinate interface directly to the NoC (there is no APB/OBI
+adapter chain, unlike the UART and timer). Its clock and reset come from a dedicated CRG domain
+(\texttt{dc\_accelerator\_*}, see \autoref{ch:sw-crg}), so software must ungate the accelerator clock
+and release its reset before use. Although any manager on the NoC can reach it, in the base
+configuration the accelerator is driven by the Rocket core, per the platform's intended
+host-CPU-plus-accelerator usage.
+
+\begin{figure}[htbp]
+  \centering
+  \usetikzlibrary{positioning,arrows.meta,fit,backgrounds}
+  \resizebox{\textwidth}{!}{\begin{tikzpicture}[
+      font=\small,
+      >={Stealth[length=2mm]},
+      unit/.style={draw, rounded corners, minimum height=12mm, minimum width=26mm,
+                   align=center, fill=black!5},
+      lbl/.style={font=\footnotesize\ttfamily},
+      node distance=14mm and 16mm
+    ]
+    \node[unit] (axi)  {AXI4\\ subordinate};
+    \node[unit, right=of axi]  (rf)  {Register file\\ \footnotesize 16 $\times$ 32-bit};
+    \node[unit, right=of rf]   (ctrl){IRQ logic\\ \footnotesize reg0 + counter};
+
+    \coordinate (axin) at ($(axi.west)+(-16mm,0)$);
+    \draw[->] (axin) -- (axi) node[midway,above,lbl]{NoC AXI};
+    \draw[<->] (axi.east) -- (rf.west) node[midway,above,lbl]{r/w + strb};
+    \draw[->] (rf.south) |- ($(ctrl.south)+(0,-8mm)$) -| (ctrl.south)
+              node[pos=0.25,below,lbl]{reg0[1:0]};
+    \coordinate (irqout) at ($(ctrl.east)+(20mm,0)$);
+    \draw[->] (ctrl.east) -- (irqout) node[midway,above,lbl]{ACCEL\_INT};
+  \end{tikzpicture}}
+  \caption{High level schematic of the mock accelerator.}
+  \label{fig:accel-schematic}
+\end{figure}
+
+\section{Register File}
+The accelerator holds \texttt{NUM\_REGISTERS} (16 in the base configuration) 32-bit registers. The base
+address is defined by the NoC address map (\texttt{0x3000\_0000} in Libre-V); register $i$ is at byte
+offset $i \times 4$.
+
+Because the NoC data path is 64 bits wide, the register file is addressed in \emph{even/odd pairs}: one
+64-bit beat covers two consecutive 32-bit registers. The hardware forms the pair index from the address
+as
+\[
+  \texttt{idx} = (\texttt{addr[5:2]}) \mathbin{\&} \texttt{4'b1110}
+\]
+so a beat carries register \texttt{idx} in its low 32 bits and register \texttt{idx+1} in its high 32
+bits. A 32-bit access therefore lands in one half of a pair and is steered by the byte strobes: strobes
+\texttt{[3:0]} write the even (low) register and strobes \texttt{[7:4]} write the odd (high) register.
+Sub-word writes are honoured per byte, so a single-byte store modifies only its byte and leaves the
+other three intact.
+
+\begin{docnote}
+Register~0 is the control register. When probing the register file with walking patterns, start at
+index~1: writing bit~0 of register~0 arms the interrupt (see \autoref{sec:accel-irq}).
+\end{docnote}
+
+\section{Register Descriptions}
+The registers share one layout: register~0 has the defined control bits below, and registers 1--15 are
+plain 32-bit read/write storage.
+
+\regtitle{0}{Accelerator Control Register (CTRL)}
+
+\regmeta{0x3000\_0000}{0x000}{0x00000000}{RW}{Only bits [1:0] are functional; bits [31:2] are storage.}
+
+\begin{register}{H}{Accelerator Control Register (CTRL)}{}
+
+  \regfield[gray!20]{Reserved}{30}{2}{{0}}
+  \regfield{IRQ\_CLR}{1}{1}{0}
+  \regfield{IRQ\_EN}{1}{0}{0}
+  \reglabel{Reset}
+
+  \regfieldvalue[gray!20]{Reserved}{30}{2}{{RW}}
+  \regfieldvalue{IRQ\_CLR}{1}{1}{{RW}}
+  \regfieldvalue{IRQ\_EN}{1}{0}{{RW}}
+  \reglabel{Type}
+
+\end{register}
+
+\textbf{Functional Description.}
+
+Register~0 arms and clears the accelerator interrupt. \textbf{IRQ\_EN} (bit~0) arms the interrupt engine;
+\textbf{IRQ\_CLR} (bit~1) acknowledges an asserted interrupt. The upper 30 bits are stored and read back
+but have no effect. The behaviour of the interrupt engine is described in \autoref{sec:accel-irq}.
+
+\begin{regmap}
+31:2 & reserved & RW & 0 &
+Reserved. Stored but have no effect. \\
+1    & IRQ\_CLR  & RW & 0 &
+Interrupt clear/acknowledge. Writing 1 deasserts an active interrupt and restarts the counter; the bit
+self-clears in hardware. \\
+0    & IRQ\_EN   & RW & 0 &
+Interrupt enable (arm). While 1, the engine counts and asserts the interrupt; while 0, the interrupt is
+held deasserted and the counter is reset. \\
+\end{regmap}
+
+\regtitle{$i$}{General-Purpose Register (REG$i$), $i = 1 \ldots 15$}
+
+\regmeta{0x3000\_0000}{$i \times$ 0x004}{0x00000000}{RW}{Plain 32-bit storage. Byte-strobe writable.}
+
+\begin{register}{H}{General-Purpose Register (REG$i$)}{}
+
+  \regfield{DATA}{32}{0}{{00000000000000000000000000000000}}
+  \reglabel{Reset}
+
+  \regfieldvalue{DATA}{32}{0}{{RW}}
+  \reglabel{Type}
+
+\end{register}
+
+\textbf{Functional Description.}
+
+Registers 1 through 15 are general-purpose 32-bit scratch registers with no hardware side effects. In
+the mock accelerator they demonstrate the read/write and byte-strobe paths; in a real accelerator they
+are where the design places its command, status, and data registers.
+
+\begin{regmap}
+31:0 & DATA & RW & 0 &
+General-purpose data. Full 32-bit read/write, byte and half-word strobes honoured. \\
+\end{regmap}
+
+\section{Interrupt}\label{sec:accel-irq}
+The accelerator drives a single interrupt line, delivered to the Rocket's PLIC as source~2
+(\texttt{ROCKET\_PLIC\_SRC\_ACCEL}, see \autoref{ch:sw-rocket-sys}). The engine is a simple counter
+whose limit is \texttt{ACCEL\_INT\_COUNT} (100 cycles in the base configuration):
+
+\begin{itemize}[nosep]
+  \item With \textbf{IRQ\_EN} = 0 the interrupt is held low and the counter is held at 0.
+  \item When \textbf{IRQ\_EN} is set to 1 the counter advances each cycle. After
+        \texttt{ACCEL\_INT\_COUNT} cycles the interrupt line asserts and \emph{stays} asserted (it is a
+        level, not a pulse).
+  \item Writing \textbf{IRQ\_CLR} = 1 acknowledges the interrupt: the line deasserts, \textbf{IRQ\_CLR}
+        self-clears, and the counter restarts. While the accelerator remains armed it therefore
+        re-asserts periodically, once every \texttt{ACCEL\_INT\_COUNT} cycles.
+\end{itemize}
+
+\begin{docwarning}
+Because the interrupt is a level that re-arms while \textbf{IRQ\_EN} stays 1, an in-flight assertion can
+re-appear if the device is cleared without first masking it at the PLIC. To disarm cleanly, mask the
+source at the PLIC \emph{first}, then clear \textbf{IRQ\_EN} at the device. A handler should acknowledge
+with \textbf{IRQ\_CLR} alone (bit~1), not \texttt{IRQ\_EN|IRQ\_CLR}, so it does not re-arm.
+\end{docwarning}
+
+\section{Address Map Summary}
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Offset} & \textbf{Register} & \textbf{Access} \\
+\midrule
+0x000        & CTRL (register 0: IRQ\_EN, IRQ\_CLR) & RW \\
+0x004--0x03C & REG1--REG15 (general purpose)        & RW \\
+\bottomrule
+\end{tabular}
+
+\section{Source Files}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{File} & \textbf{Role} \\
+\midrule
+\texttt{accelerator/src/accelerator.sv} & Mock accelerator: register file, byte strobes, IRQ counter \\
+\texttt{top/noc\_accelerator.sv}        & NoC-side wrapper (struct-to-flat AXI4 subordinate) \\
+\bottomrule
+\end{tabular}
+
+\newpage
